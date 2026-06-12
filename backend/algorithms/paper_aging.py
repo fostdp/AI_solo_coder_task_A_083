@@ -15,6 +15,22 @@ from typing import List, Dict, Tuple, Optional
 
 R_GAS = 8.314
 
+PAPER_TYPE_EA_MAP = {
+    "bamboo": 78.0,
+    "bark": 85.0,
+    "xuan": 92.0,
+    "hemp": 88.0,
+    "default": 100.0,
+}
+
+PAPER_TYPE_LABELS = {
+    "bamboo": "竹纸",
+    "bark": "皮纸",
+    "xuan": "宣纸",
+    "hemp": "麻纸",
+    "default": "通用手工纸",
+}
+
 
 @dataclass
 class AgingPrediction:
@@ -28,6 +44,8 @@ class AgingPrediction:
     dp_365d: float
     life_expectancy_years: float
     risk_level: str
+    paper_type: str = "default"
+    activation_energy_kj: float = 100.0
 
 
 class PaperAgingModel:
@@ -45,15 +63,25 @@ class PaperAgingModel:
         self.base_k_ph = base_rate_ph_year
         self.DP0 = cellulose_initial_dp
         self.DP_EOL = dp_end_of_life
-        self.k_ref_ph = self._arrhenius(self.T_ref) * self.base_k_ph
+        self.k_ref_ph = self._arrhenius(self.Ea, self.T_ref) * self.base_k_ph
 
-    def _arrhenius(self, T_abs: float) -> float:
-        return math.exp(-self.Ea / (R_GAS * T_abs))
+    @staticmethod
+    def _arrhenius(ea_j: float, T_abs: float) -> float:
+        return math.exp(-ea_j / (R_GAS * T_abs))
 
-    def _temp_factor(self, temp_c: float) -> float:
+    @staticmethod
+    def get_ea_for_paper_type(paper_type: str) -> float:
+        return PAPER_TYPE_EA_MAP.get(paper_type, PAPER_TYPE_EA_MAP["default"]) * 1000.0
+
+    @staticmethod
+    def get_ea_kj_for_paper_type(paper_type: str) -> float:
+        return PAPER_TYPE_EA_MAP.get(paper_type, PAPER_TYPE_EA_MAP["default"])
+
+    def _temp_factor(self, temp_c: float, ea_j: float = None) -> float:
+        ea = ea_j if ea_j is not None else self.Ea
         T = temp_c + 273.15
-        k_T = self._arrhenius(T)
-        k_ref = self._arrhenius(self.T_ref)
+        k_T = self._arrhenius(ea, T)
+        k_ref = self._arrhenius(ea, self.T_ref)
         return k_T / k_ref if k_ref > 0 else 1.0
 
     def _humidity_factor(self, rh_percent: float) -> float:
@@ -76,8 +104,10 @@ class PaperAgingModel:
         rh_percent: float,
         current_ph: float,
         voc_ppm: float = 0.0,
+        paper_type: str = "default",
     ) -> float:
-        f_temp = self._temp_factor(temp_c)
+        ea_j = self.get_ea_for_paper_type(paper_type)
+        f_temp = self._temp_factor(temp_c, ea_j)
         f_hum = self._humidity_factor(rh_percent)
         f_ph = self._ph_sensitivity_factor(current_ph)
         f_voc = 1.0 + voc_ppm * 0.15
@@ -90,11 +120,12 @@ class PaperAgingModel:
         avg_rh: float,
         avg_voc_ppm: float = 0.0,
         days_list: Optional[List[int]] = None,
+        paper_type: str = "default",
     ) -> Dict[int, float]:
         days_list = days_list or [30, 90, 180, 365]
         results = {}
         rate_per_year = self.calculate_instant_aging_rate(
-            avg_temp_c, avg_rh, initial_ph, avg_voc_ppm
+            avg_temp_c, avg_rh, initial_ph, avg_voc_ppm, paper_type
         )
         rate_per_day = rate_per_year / 365.0
         for d in days_list:
@@ -116,9 +147,10 @@ class PaperAgingModel:
         avg_temp_c: float,
         avg_rh: float,
         avg_voc_ppm: float = 0.0,
+        paper_type: str = "default",
     ) -> float:
         annual_rate = self.calculate_instant_aging_rate(
-            avg_temp_c, avg_rh, current_ph, avg_voc_ppm
+            avg_temp_c, avg_rh, current_ph, avg_voc_ppm, paper_type
         )
         ph_to_eol = max(0.0, current_ph - 4.5)
         years_by_ph = ph_to_eol / annual_rate if annual_rate > 0 else 999.0
@@ -134,18 +166,22 @@ class PaperAgingModel:
         avg_rh: float,
         avg_voc_ppm: float = 0.0,
         book_age_years: float = 100.0,
+        paper_type: str = "default",
     ) -> AgingPrediction:
         ph_dict = self.predict_ph_over_time(
             initial_ph, avg_temp_c, avg_rh, avg_voc_ppm,
             days_list=[30, 90, 180, 365],
+            paper_type=paper_type,
         )
         rate = self.calculate_instant_aging_rate(
-            avg_temp_c, avg_rh, initial_ph, avg_voc_ppm
+            avg_temp_c, avg_rh, initial_ph, avg_voc_ppm, paper_type
         )
         dp_now = self.calculate_dp(initial_ph, book_age_years)
         ph_365 = ph_dict.get(365, initial_ph)
         dp_365 = self.calculate_dp(ph_365, book_age_years + 1.0)
-        life = self.estimate_life_expectancy(initial_ph, dp_now, avg_temp_c, avg_rh, avg_voc_ppm)
+        life = self.estimate_life_expectancy(
+            initial_ph, dp_now, avg_temp_c, avg_rh, avg_voc_ppm, paper_type
+        )
 
         if ph_365 < 5.0 or life < 20:
             risk = "CRITICAL"
@@ -155,6 +191,8 @@ class PaperAgingModel:
             risk = "MEDIUM"
         else:
             risk = "LOW"
+
+        ea_kj = self.get_ea_kj_for_paper_type(paper_type)
 
         return AgingPrediction(
             ph_current=round(initial_ph, 4),
@@ -167,6 +205,8 @@ class PaperAgingModel:
             dp_365d=round(dp_365, 1),
             life_expectancy_years=life,
             risk_level=risk,
+            paper_type=paper_type,
+            activation_energy_kj=ea_kj,
         )
 
 

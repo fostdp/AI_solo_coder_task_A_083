@@ -39,6 +39,7 @@ CREATE TABLE book_slot_metadata (
     book_dynasty    String COMMENT '朝代：明/清',
     book_type       String COMMENT '类型：刻本/医案/手稿',
     book_count      Int32  COMMENT '藏书册数',
+    paper_type      String DEFAULT 'default' COMMENT '纸张原料类型：bamboo竹纸/bark皮纸/xuan宣纸/hemp麻纸/default通用',
     sensor_env_id   String COMMENT '关联环境传感器ID',
     sensor_ph_id    String COMMENT '关联pH传感器ID',
     create_time     DateTime DEFAULT now()

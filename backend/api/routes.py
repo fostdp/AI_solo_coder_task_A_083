@@ -27,6 +27,7 @@ class PredictionRequest(BaseModel):
     avg_rh: float = Field(50.0, ge=0, le=100)
     avg_voc_ppm: float = Field(0.5, ge=0, le=50)
     book_age_years: float = Field(150.0, ge=0, le=2000)
+    paper_type: str = Field("default", description="纸张原料类型：bamboo/bark/xuan/hemp/default")
 
 
 class HerbRecommendRequest(BaseModel):
@@ -108,12 +109,18 @@ def _generate_dummy_slots(shelf_id: str) -> List[Dict]:
     ]
     dynasties = ["明", "清"]
     types = ["刻本", "医案", "手稿"]
+    paper_types = ["bamboo", "bark", "xuan", "hemp", "default"]
     data = []
     idx = 0
     for r in range(1, rows_c + 1):
         for c in range(1, cols_c + 1):
             env_no = (idx % 50) + 1
             ph_no = (idx % 20) + 1
+            pt = paper_types[idx % len(paper_types)]
+            if dynasties[idx % 2] == "明":
+                pt = "bamboo" if idx % 3 != 0 else "xuan"
+            else:
+                pt = "bark" if idx % 3 != 0 else "hemp"
             data.append({
                 "slot_id": f"{shelf_id}-R{r:02d}-C{c:02d}",
                 "shelf_id": shelf_id,
@@ -123,6 +130,7 @@ def _generate_dummy_slots(shelf_id: str) -> List[Dict]:
                 "book_dynasty": dynasties[idx % 2],
                 "book_type": types[idx % 3],
                 "book_count": 3 + (idx % 15),
+                "paper_type": pt,
                 "sensor_env_id": f"ENV-{env_no:03d}",
                 "sensor_ph_id": f"PH-{ph_no:03d}",
             })
@@ -294,6 +302,14 @@ async def get_heatmap_data(shelf_id: str):
     ph_rows = {r["slot_id"]: r for r in get_ch().query(ph_sql, {"sid": shelf_id})}
 
     slot_list = _generate_dummy_slots(shelf_id)
+    slot_paper_types = {}
+    try:
+        pt_sql = "SELECT slot_id, paper_type FROM book_slot_metadata WHERE shelf_id = {sid:String}"
+        pt_rows = get_ch().query(pt_sql, {"sid": shelf_id})
+        slot_paper_types = {r["slot_id"]: r.get("paper_type", "default") for r in pt_rows}
+    except Exception:
+        pass
+
     data = []
     for slot in slot_list:
         sid = slot["slot_id"]
@@ -306,8 +322,10 @@ async def get_heatmap_data(shelf_id: str):
         light = float(env.get("light") if env.get("light") is not None else 10 + (hash(sid + "l") % 300) / 10)
         ph_val = float(ph.get("ph_avg") if ph.get("ph_avg") is not None else round(6.8 - (hash(sid + "p") % 250) / 100, 2))
 
+        paper_type = slot_paper_types.get(sid, slot.get("paper_type", "default"))
+
         mold_risk = mold_growth_model.evaluate(temp, humi, 72, mold, active)
-        aging = paper_aging_model.full_prediction(ph_val, temp, humi, 0.5, 150)
+        aging = paper_aging_model.full_prediction(ph_val, temp, humi, 0.5, 150, paper_type)
 
         acid_score = max(0.0, min(1.0, (7.0 - ph_val) / 2.5))
         mold_score = mold_risk.mold_risk_index
@@ -353,6 +371,8 @@ async def get_heatmap_data(shelf_id: str):
                 "life_expectancy": aging.life_expectancy_years,
                 "risk_level": aging.risk_level,
                 "mold_species": mold_risk.mold_species,
+                "paper_type": paper_type,
+                "activation_energy_kj": aging.activation_energy_kj,
             },
         })
     return {
@@ -373,6 +393,7 @@ async def predict_paper_aging(req: PredictionRequest):
         avg_rh=req.avg_rh,
         avg_voc_ppm=req.avg_voc_ppm,
         book_age_years=req.book_age_years,
+        paper_type=req.paper_type,
     )
     return {
         "slot_id": req.slot_id,
@@ -388,6 +409,8 @@ async def predict_paper_aging(req: PredictionRequest):
             "dp_365d": result.dp_365d,
             "life_expectancy_years": result.life_expectancy_years,
             "risk_level": result.risk_level,
+            "paper_type": result.paper_type,
+            "activation_energy_kj": result.activation_energy_kj,
         }
     }
 

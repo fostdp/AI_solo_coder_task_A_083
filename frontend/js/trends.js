@@ -31,6 +31,9 @@ const TrendCharts = (() => {
     if (!el) return;
     const cfg = METRIC_CONFIG[metricKey] || METRIC_CONFIG.temp;
 
+    d3.select(el).selectAll('svg').on('.chart', null);
+    d3.select(el).selectAll('*').remove();
+
     const rows = (data || []).map(r => ({
       t: _parseTs(r.ts_bucket || r.day || r.timestamp),
       v: +r[cfg.key],
@@ -192,6 +195,7 @@ const TrendCharts = (() => {
     const el = typeof containerSel === 'string'
       ? document.querySelector(containerSel) : containerSel;
     if (!el) return;
+    d3.select(el).selectAll('svg').on('.chart', null);
     d3.select(el).selectAll('*').remove();
     const rect = el.getBoundingClientRect();
     const W = rect.width || 460, H = rect.height || 240;
@@ -306,6 +310,7 @@ const TrendCharts = (() => {
     const el = typeof containerSel === 'string'
       ? document.querySelector(containerSel) : containerSel;
     if (!el) return;
+    d3.select(el).selectAll('svg').on('.chart', null);
     d3.select(el).selectAll('*').remove();
     const data = (rows || []).map(r => ({
       t: _parseTs(r.day || r.timestamp),

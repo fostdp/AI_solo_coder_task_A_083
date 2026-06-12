@@ -21,6 +21,7 @@ class Shelf3DRenderer {
     this.slots = [];
     this.hitMap = [];
     this.hoverSlot = null;
+    this._cachedImageData = null;
 
     this.layers = { acidosis: true, mold: true, insect: true };
     this._isDragging = false;
@@ -48,6 +49,8 @@ class Shelf3DRenderer {
   setShelf(shelfId, rows, cols, slots) {
     this.shelf = { id: shelfId, rows, cols };
     this.slots = slots || [];
+    this._cachedImageData = null;
+    this._prevHeatKey = null;
     this.requestRender();
   }
 
@@ -171,9 +174,10 @@ class Shelf3DRenderer {
   }
 
   _hitTest(x, y) {
+    const cx = this.ctx;
     for (let i = this.hitMap.length - 1; i >= 0; i--) {
       const h = this.hitMap[i];
-      if (h.ctx.isPointInPath(x * this.dpr, y * this.dpr)) {
+      if (cx.isPointInPath(h.path, x * this.dpr, y * this.dpr)) {
         return h.slot;
       }
     }
@@ -188,8 +192,13 @@ class Shelf3DRenderer {
   _render() {
     this._animId = null;
     const ctx = this.ctx;
-    ctx.clearRect(0, 0, this.w, this.h);
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.restore();
     this.hitMap = [];
+    this._cachedImageData = null;
 
     if (!this.shelf) {
       this._drawEmptyState();
@@ -243,6 +252,15 @@ class Shelf3DRenderer {
     books.sort((a, b) => a._depth - b._depth);
 
     this._drawShelfFrame(books, rows, cols, unitW, unitH, unitD, cosY, sinY, cosX, sinX);
+
+    const heatKey = this.slots.map(s => s?.scores ? `${s.slot_id}:${s.scores.acidosis||0}:${s.scores.mold||0}:${s.scores.insect||0}` : '').join('|');
+    const layersKey = JSON.stringify(this.layers);
+    const fullKey = `${heatKey}|${layersKey}`;
+
+    if (fullKey !== this._prevHeatKey) {
+      this._prevHeatKey = fullKey;
+      this._cachedImageData = null;
+    }
 
     books.forEach(b => {
       this._drawSlot(ctx, b, cosY, sinY, cosX, sinX);
@@ -404,7 +422,7 @@ class Shelf3DRenderer {
     ctx.stroke(frontPath);
 
     if (slot) {
-      this.hitMap.push({ ctx: this.ctx, path: frontPath, slot: b });
+      this.hitMap.push({ path: frontPath, slot: b });
     }
 
     if (heatColor && heatAlpha > 0) {
