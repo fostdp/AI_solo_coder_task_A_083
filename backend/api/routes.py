@@ -2,6 +2,7 @@
 FastAPI REST API 路由定义
 """
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 
@@ -672,9 +673,6 @@ def _generate_dummy_trend(hours: int, granularity: str) -> List[Dict]:
             "active_mold_cnt": 1 if random.random() < 0.002 else 0,
         })
     return data
-
-
-import math
 
 
 def _generate_dummy_ph(shelf_id=None, slot_id=None) -> List[Dict]:

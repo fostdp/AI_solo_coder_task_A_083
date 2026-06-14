@@ -1,161 +1,190 @@
-"""
-霉菌生长模型
-基于温度和相对湿度的响应函数模型 (ISO 16000 / Skaar 曲线拟合)
-同时包含虫蛀风险评估
-"""
 import math
-from dataclasses import dataclass
-from typing import List, Dict, Tuple, Optional
+from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional
 
 
 @dataclass
-class MoldRiskResult:
+class MoldGrowthResult:
     mold_risk_index: float
     mold_growth_rate: float
     germination_likelihood: float
-    mycelium_coverage_days: Optional[float]
+    mycelium_coverage_days: float
     spore_production_risk: float
     active_mold_risk: float
     insect_risk_index: float
-    mold_species: List[str]
+    mold_species: List[str] = field(default_factory=list)
 
 
 class MoldGrowthModel:
+    R = 8.314
 
-    def __init__(self):
-        self.species_params = {
-            "Aspergillus flavus": {"T_min": 12.0, "T_opt": 32.0, "T_max": 45.0,
-                                   "RH_min": 0.82, "RH_opt": 0.95, "k": 0.85},
-            "Aspergillus niger": {"T_min": 6.0, "T_opt": 30.0, "T_max": 47.0,
-                                  "RH_min": 0.77, "RH_opt": 0.94, "k": 0.90},
-            "Penicillium chrysogenum": {"T_min": 4.0, "T_opt": 26.0, "T_max": 38.0,
-                                        "RH_min": 0.78, "RH_opt": 0.93, "k": 0.80},
-            "Chaetomium globosum": {"T_min": 6.0, "T_opt": 28.0, "T_max": 38.0,
-                                    "RH_min": 0.90, "RH_opt": 0.97, "k": 1.10},
-            "Trichoderma viride": {"T_min": 5.0, "T_opt": 27.0, "T_max": 38.0,
-                                   "RH_min": 0.85, "RH_opt": 0.96, "k": 0.95},
-        }
+    SPECIES = [
+        {
+            "name": "Aspergillus flavus",
+            "zh": "黄曲霉",
+            "T_opt": (28.0, 33.0),
+            "RH_min": 0.80,
+            "RH_opt": (0.90, 0.95),
+            "activation_kj": 70.0,
+            "toxin": True,
+            "paper_digest": True,
+        },
+        {
+            "name": "Aspergillus niger",
+            "zh": "黑曲霉",
+            "T_opt": (25.0, 30.0),
+            "RH_min": 0.75,
+            "RH_opt": (0.85, 0.95),
+            "activation_kj": 65.0,
+            "toxin": True,
+            "paper_digest": True,
+        },
+        {
+            "name": "Penicillium chrysogenum",
+            "zh": "产黄青霉",
+            "T_opt": (22.0, 28.0),
+            "RH_min": 0.78,
+            "RH_opt": (0.85, 0.92),
+            "activation_kj": 62.0,
+            "toxin": False,
+            "paper_digest": True,
+        },
+        {
+            "name": "Chaetomium globosum",
+            "zh": "球毛壳霉",
+            "T_opt": (25.0, 32.0),
+            "RH_min": 0.82,
+            "RH_opt": (0.92, 0.98),
+            "activation_kj": 75.0,
+            "toxin": False,
+            "paper_digest": True,
+        },
+        {
+            "name": "Trichoderma viride",
+            "zh": "绿色木霉",
+            "T_opt": (24.0, 30.0),
+            "RH_min": 0.80,
+            "RH_opt": (0.88, 0.96),
+            "activation_kj": 60.0,
+            "toxin": False,
+            "paper_digest": True,
+        },
+    ]
 
-    def _temp_response(self, T: float, T_min: float, T_opt: float, T_max: float) -> float:
-        if T <= T_min or T >= T_max:
+    def _temperature_response(self, T_c: float, T_opt_min: float, T_opt_max: float, Ea_kj: float) -> float:
+        if T_c <= 0 or T_c >= 55:
             return 0.0
-        if T <= T_opt:
-            x = (T - T_min) / (T_opt - T_min) if T_opt > T_min else 1.0
-            return math.sin(math.pi * x / 2)
+        T_k = T_c + 273.15
+        T_opt_mid = (T_opt_min + T_opt_max) / 2 + 273.15
+        Ea = Ea_kj * 1000.0
+        R = 8.314
+        try:
+            arrh = math.exp(Ea / R * (1 / T_opt_mid - 1 / T_k))
+        except OverflowError:
+            arrh = 0.0
+        if T_c < T_opt_min:
+            penalty = math.exp(-0.15 * (T_opt_min - T_c) ** 2)
+        elif T_c > T_opt_max:
+            penalty = math.exp(-0.12 * (T_c - T_opt_max) ** 2)
         else:
-            x = (T_max - T) / (T_max - T_opt) if T_max > T_opt else 1.0
-            return math.sin(math.pi * x / 2 + math.pi / 2) * 0.7 + 0.3
+            penalty = 1.0
+        return max(0.0, min(1.5, arrh * penalty))
 
-    def _rh_response(self, RH_frac: float, RH_min: float, RH_opt: float) -> float:
-        if RH_frac < RH_min:
-            return 0.0
-        if RH_frac >= RH_opt:
+    def _humidity_response(self, rh_percent: float, rh_min: float, rh_opt_min: float, rh_opt_max: float) -> float:
+        rh = rh_percent / 100.0
+        if rh < rh_min:
+            return max(0.0, math.exp(-8.0 * (rh_min - rh)))
+        if rh < rh_opt_min:
+            t = (rh - rh_min) / (rh_opt_min - rh_min) if rh_opt_min > rh_min else 1.0
+            return 0.1 + 0.9 * t
+        if rh <= rh_opt_max:
             return 1.0
-        normalized = (RH_frac - RH_min) / (RH_opt - RH_min)
-        return 1.0 - math.exp(-4.0 * normalized)
-
-    def _time_factor(self, exposure_hours: float) -> float:
-        return 1.0 - math.exp(-exposure_hours / 48.0)
-
-    def _single_species_risk(
-        self,
-        temp_c: float,
-        rh_percent: float,
-        exposure_hours: float,
-        params: Dict,
-    ) -> Tuple[float, float, float]:
-        RH = rh_percent / 100.0
-        f_T = self._temp_response(temp_c, params["T_min"], params["T_opt"], params["T_max"])
-        f_RH = self._rh_response(RH, params["RH_min"], params["RH_opt"])
-        f_t = self._time_factor(exposure_hours)
-        germination = f_T * f_RH * f_t
-        growth_rate = params["k"] * f_T * f_RH
-        spore_risk = germination * (0.5 + 0.5 * f_t) if germination > 0.3 else 0.0
-        return germination, growth_rate, spore_risk
+        return max(0.7, 1.0 - 2.5 * (rh - rh_opt_max))
 
     def evaluate(
         self,
         temp_c: float,
         rh_percent: float,
-        exposure_hours: float = 72.0,
-        spore_concentration: float = 0.0,
-        active_mold_detected: int = 0,
-        voc_ppm: float = 0.0,
-    ) -> MoldRiskResult:
-        species_risks: Dict[str, float] = {}
-        total_germination = 0.0
-        total_growth_rate = 0.0
-        total_spore_risk = 0.0
-        active_species: List[str] = []
-
-        for name, params in self.species_params.items():
-            germ, growth, spore = self._single_species_risk(
-                temp_c, rh_percent, exposure_hours, params
-            )
-            species_risks[name] = germ
-            total_germination += germ
-            total_growth_rate += growth
-            total_spore_risk += spore
-            if germ > 0.3:
-                active_species.append(name)
-
-        n_species = len(self.species_params)
-        avg_germination = total_germination / n_species
-        avg_growth = total_growth_rate / n_species
-        avg_spore = total_spore_risk / n_species
-
-        f_spore = 1.0 + (spore_concentration / 1000.0) * 0.6
-        f_voc = 1.0 + voc_ppm * 0.1
-        mold_risk = min(1.0, avg_germination * f_spore * f_voc * (1.2 if active_mold_detected else 1.0))
-
-        active_mold_risk = 0.0
-        if active_mold_detected:
-            active_mold_risk = 1.0
-        elif mold_risk > 0.7 and spore_concentration > 1000:
-            active_mold_risk = 0.8
-
-        coverage_days: Optional[float] = None
-        if avg_growth > 0.1:
-            coverage_days = round(30.0 / (avg_growth * 10), 1) if avg_growth > 0 else None
-
-        insect_risk = self._insect_risk_index(temp_c, rh_percent, spore_concentration)
-
-        return MoldRiskResult(
-            mold_risk_index=round(mold_risk, 4),
-            mold_growth_rate=round(avg_growth, 5),
-            germination_likelihood=round(avg_germination, 4),
-            mycelium_coverage_days=coverage_days,
-            spore_production_risk=round(min(1.0, avg_spore * f_spore), 4),
-            active_mold_risk=round(active_mold_risk, 4),
-            insect_risk_index=round(insect_risk, 4),
-            mold_species=active_species[:3],
-        )
-
-    def _insect_risk_index(
-        self,
-        temp_c: float,
-        rh_percent: float,
+        exposure_hours: float,
         spore_concentration: float,
-    ) -> float:
-        f_T = 0.0
-        if 18 <= temp_c <= 35:
-            if temp_c <= 28:
-                f_T = (temp_c - 18) / 10.0
-            else:
-                f_T = 1.0 - (temp_c - 28) / 7.0
-            f_T = max(0.0, min(1.0, f_T))
+        active_mold_flag: int = 0,
+        voc_ppm: float = 0.0,
+    ) -> MoldGrowthResult:
+        T = max(-10.0, min(60.0, float(temp_c)))
+        RH = max(0.0, min(100.0, float(rh_percent)))
+        exposure_h = max(0.0, float(exposure_hours))
+        spores = max(0.0, float(spore_concentration))
+        voc = max(0.0, float(voc_ppm))
+        active = int(active_mold_flag)
 
-        RH = rh_percent / 100.0
-        f_RH = 0.0
-        if 0.50 <= RH <= 0.85:
-            if RH <= 0.70:
-                f_RH = (RH - 0.50) / 0.20
-            else:
-                f_RH = 1.0 - (RH - 0.70) / 0.15
-            f_RH = max(0.0, min(1.0, f_RH))
+        species_risks: List[Dict[str, Any]] = []
+        for sp in self.SPECIES:
+            t_resp = self._temperature_response(T, sp["T_opt"][0], sp["T_opt"][1], sp["activation_kj"])
+            h_resp = self._humidity_response(RH, sp["RH_min"], sp["RH_opt"][0], sp["RH_opt"][1])
+            combined = t_resp * h_resp
+            species_risks.append({
+                "spec": sp,
+                "t_resp": t_resp,
+                "h_resp": h_resp,
+                "combined": combined,
+            })
 
-        f_spore = min(1.0, spore_concentration / 800.0)
-        return min(1.0, 0.55 * f_T * f_RH + 0.2 * f_spore + 0.1)
+        species_risks.sort(key=lambda x: x["combined"], reverse=True)
+        top_species = species_risks[:3]
+
+        avg_combined = sum(s["combined"] for s in species_risks) / max(1, len(species_risks))
+        max_combined = max(s["combined"] for s in species_risks)
+
+        spore_factor = 1.0 + math.log1p(spores / 100.0) / math.log(101.0) * 2.5
+        if spores > 1000:
+            spore_factor *= 1.5
+        if spores < 50:
+            spore_factor *= 0.4
+
+        exposure_factor = 1.0 - math.exp(-exposure_h / 48.0)
+
+        voc_factor = 1.0 + 0.15 * voc
+
+        mold_growth_rate = max_combined * spore_factor * voc_factor
+
+        germination_likelihood = min(1.0, avg_combined * spore_factor * (1.0 - math.exp(-exposure_h / 12.0)))
+        germination_likelihood *= (0.4 + 0.6 * min(1.0, spores / 500.0))
+
+        if germination_likelihood > 0.1 and mold_growth_rate > 0.1:
+            coverage_rate = 0.08 * mold_growth_rate * germination_likelihood
+            if coverage_rate > 0:
+                mycelium_coverage_days = max(1.0, 1.0 / coverage_rate)
+            else:
+                mycelium_coverage_days = 999.0
+        else:
+            mycelium_coverage_days = 999.0
+
+        spore_production_risk = min(1.0, germination_likelihood * (1.0 - math.exp(-exposure_h / 240.0)) * (0.3 + 0.7 * min(1.0, spores / 1500.0)))
+
+        active_mold_risk = min(1.0, active + (0.5 * germination_likelihood * (1.0 - math.exp(-exposure_h / 120.0))))
+
+        mold_risk_index = 0.35 * max_combined + 0.25 * germination_likelihood + 0.2 * spore_production_risk + 0.2 * active_mold_risk
+        mold_risk_index = max(0.0, min(1.0, mold_risk_index * spore_factor * exposure_factor))
+
+        insect_temp_factor = max(0.0, min(1.0, (T - 10.0) / 20.0) if T < 30 else max(0.0, 1.0 - (T - 30.0) / 15.0))
+        insect_humi_factor = 0.6 + 0.4 * (RH / 100.0)
+        insect_mold_factor = 1.0 + 0.5 * mold_risk_index
+        insect_risk_index = min(1.0, 0.28 * insect_temp_factor * insect_humi_factor * insect_mold_factor * (0.5 + 0.5 * min(1.0, spores / 2000.0)))
+
+        susceptible = [s["spec"]["zh"] for s in top_species if s["combined"] > 0.15]
+        if not susceptible and (spores > 200 or active):
+            susceptible = [s["spec"]["zh"] for s in top_species]
+
+        return MoldGrowthResult(
+            mold_risk_index=round(mold_risk_index, 4),
+            mold_growth_rate=round(mold_growth_rate, 4),
+            germination_likelihood=round(germination_likelihood, 4),
+            mycelium_coverage_days=round(mycelium_coverage_days, 1),
+            spore_production_risk=round(spore_production_risk, 4),
+            active_mold_risk=round(active_mold_risk, 4),
+            insect_risk_index=round(insect_risk_index, 4),
+            mold_species=susceptible,
+        )
 
 
 mold_growth_model = MoldGrowthModel()
