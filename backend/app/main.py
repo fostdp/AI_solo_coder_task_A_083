@@ -4,17 +4,21 @@
 """
 import asyncio
 import json
-import logging
+import time
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from clickhouse_driver import Client
 
-from .core.config import config, setup_logging
+from loguru import logger
+
+from .core.config import config
+from .core.logging_setup import setup_loguru_logging
+from .core.metrics import metrics
 from .core.queue_manager import queue_manager
 from .core.messages import (
     AgingPredictionRequest,
@@ -29,8 +33,7 @@ from .aging_engine import AgingEngineService
 from .mold_engine import MoldEngineService
 from .alerter import AlerterService
 
-setup_logging(config)
-logger = logging.getLogger(__name__)
+setup_loguru_logging(config)
 
 
 class SystemServices:
@@ -102,6 +105,10 @@ class SystemServices:
         )
 
         self._running = True
+        metrics.set_system_running(True)
+        metrics.set_clickhouse_connected(self.clickhouse_client is not None)
+        metrics.set_mqtt_connected(self.ingest.subscriber.is_connected() if self.ingest else False)
+
         logger.info("所有系统服务已启动")
 
     async def stop(self):
@@ -128,12 +135,17 @@ class SystemServices:
                 logger.error(f"关闭ClickHouse连接失败: {e}")
 
         self._running = False
+        metrics.set_system_running(False)
+        metrics.set_clickhouse_connected(False)
+        metrics.set_mqtt_connected(False)
+
         logger.info("所有系统服务已停止")
 
     async def add_ws_client(self, websocket: WebSocket):
         """添加WebSocket客户端"""
         async with self._ws_lock:
             self._ws_clients.append(websocket)
+        metrics.set_websocket_connections(len(self._ws_clients))
         logger.info(f"WebSocket客户端已连接，当前: {len(self._ws_clients)}")
 
     async def remove_ws_client(self, websocket: WebSocket):
@@ -141,6 +153,7 @@ class SystemServices:
         async with self._ws_lock:
             if websocket in self._ws_clients:
                 self._ws_clients.remove(websocket)
+        metrics.set_websocket_connections(len(self._ws_clients))
         logger.info(f"WebSocket客户端已断开，当前: {len(self._ws_clients)}")
 
     async def broadcast_ws(self, message: Dict[str, Any]):
@@ -208,6 +221,46 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def prometheus_middleware(request: Request, call_next):
+    """Prometheus指标中间件"""
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+
+    endpoint = request.url.path
+    if endpoint.startswith("/api/"):
+        endpoint = "/api/" + endpoint.split("/")[2]
+    elif endpoint not in ("/", "/health", "/metrics", "/docs", "/redoc", "/openapi.json"):
+        endpoint = "other"
+
+    metrics.record_api_request(
+        method=request.method,
+        endpoint=endpoint,
+        status_code=response.status_code,
+        duration=duration
+    )
+
+    return response
+
+
+@app.get("/metrics")
+async def get_metrics():
+    """Prometheus指标端点"""
+    from .core.queue_manager import queue_manager
+
+    queue_stats = queue_manager.get_all_stats()
+    for queue_type, queues in queue_stats.items():
+        for q_name, stats in queues.items():
+            if isinstance(stats, dict):
+                metrics.set_queue_length(q_name, stats.get("current_size", 0))
+
+    return PlainTextResponse(
+        content=metrics.get_latest_metrics(),
+        media_type=metrics.get_content_type()
+    )
 
 
 @app.get("/")

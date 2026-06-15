@@ -1,6 +1,6 @@
 """
 核心模块
-包含配置加载、消息协议、队列管理
+包含配置加载、消息协议、队列管理、日志、指标
 """
 from .config import Config, ServiceConfig, config, setup_logging
 from .messages import (
@@ -25,6 +25,8 @@ from .queue_manager import (
     QueueStats,
     queue_manager,
 )
+from .logging_setup import setup_loguru_logging, get_logger, JsonFormatter
+from .metrics import MetricsManager, metrics
 
 __all__ = [
     "Config",
@@ -49,4 +51,9 @@ __all__ = [
     "ProcessQueueWrapper",
     "QueueStats",
     "queue_manager",
+    "setup_loguru_logging",
+    "get_logger",
+    "JsonFormatter",
+    "MetricsManager",
+    "metrics",
 ]

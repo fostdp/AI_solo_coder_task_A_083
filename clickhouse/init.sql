@@ -116,6 +116,22 @@ SELECT
 FROM env_sensor_data
 GROUP BY hour_start, shelf_id, slot_id;
 
+CREATE MATERIALIZED VIEW IF NOT EXISTS ph_hourly_mv
+ENGINE = SummingMergeTree()
+PARTITION BY toYYYYMM(hour_start)
+ORDER BY (shelf_id, slot_id, hour_start)
+AS
+SELECT
+    toStartOfHour(timestamp) AS hour_start,
+    shelf_id,
+    slot_id,
+    avg(ph_value)       AS avg_ph,
+    max(ph_value)       AS max_ph,
+    min(ph_value)       AS min_ph,
+    count()             AS sample_count
+FROM ph_sensor_data
+GROUP BY hour_start, shelf_id, slot_id;
+
 CREATE MATERIALIZED VIEW IF NOT EXISTS ph_daily_mv
 ENGINE = SummingMergeTree()
 PARTITION BY toYYYYMM(day_start)

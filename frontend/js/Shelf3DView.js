@@ -25,6 +25,12 @@ class Shelf3DView {
         this._bgDirty = true;
         this._lastViewState = null;
 
+        this._animationFrameId = null;
+        this._renderPending = false;
+        this._lastFrameTime = 0;
+        this._targetFps = 60;
+        this._frameInterval = 1000 / this._targetFps;
+
         this._init();
     }
 
@@ -249,6 +255,19 @@ class Shelf3DView {
     }
 
     render() {
+        if (this._renderPending) {
+            return;
+        }
+        this._renderPending = true;
+
+        this._animationFrameId = requestAnimationFrame((timestamp) => {
+            this._renderPending = false;
+            this._lastFrameTime = timestamp;
+            this._doRender();
+        });
+    }
+
+    _doRender() {
         const ctx = this.ctx;
 
         const viewStateChanged = this._checkViewStateChanged();
@@ -269,6 +288,19 @@ class Shelf3DView {
 
         if (this.selectedSlot) {
             this._drawSelectedHighlight();
+        }
+    }
+
+    setTargetFps(fps) {
+        this._targetFps = fps;
+        this._frameInterval = 1000 / fps;
+    }
+
+    cancelRender() {
+        if (this._animationFrameId) {
+            cancelAnimationFrame(this._animationFrameId);
+            this._animationFrameId = null;
+            this._renderPending = false;
         }
     }
 
