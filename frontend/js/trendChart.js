@@ -5,6 +5,7 @@ class TrendChart {
         this.width = 0;
         this.height = 0;
         this.margin = { top: 20, right: 30, bottom: 40, left: 50 };
+        this.svg = null;
     }
 
     _getSize() {
@@ -13,19 +14,35 @@ class TrendChart {
         this.height = rect.height || 200;
     }
 
+    _getSvg() {
+        if (!this.svg) {
+            this.svg = d3.select(`#${this.containerId}`)
+                .append('svg')
+                .attr('width', this.width)
+                .attr('height', this.height);
+        } else {
+            this.svg
+                .attr('width', this.width)
+                .attr('height', this.height);
+            this.svg.selectAll('*').remove();
+        }
+        return this.svg;
+    }
+
+    _clearSvg() {
+        if (this.svg) {
+            this.svg.selectAll('*').remove();
+        }
+    }
+
     drawEnvChart(data) {
         this._getSize();
-        this.container.innerHTML = '';
+        const svg = this._getSvg();
 
         if (!data || data.length === 0) {
             this._drawEmptyState('暂无数据');
             return;
         }
-
-        const svg = d3.select(`#${this.containerId}`)
-            .append('svg')
-            .attr('width', this.width)
-            .attr('height', this.height);
 
         const innerWidth = this.width - this.margin.left - this.margin.right;
         const innerHeight = this.height - this.margin.top - this.margin.bottom;
@@ -170,17 +187,12 @@ class TrendChart {
 
     drawPhChart(data) {
         this._getSize();
-        this.container.innerHTML = '';
+        const svg = this._getSvg();
 
         if (!data || data.length === 0) {
             this._drawEmptyState('暂无数据');
             return;
         }
-
-        const svg = d3.select(`#${this.containerId}`)
-            .append('svg')
-            .attr('width', this.width)
-            .attr('height', this.height);
 
         const innerWidth = this.width - this.margin.left - this.margin.right;
         const innerHeight = this.height - this.margin.top - this.margin.bottom;
@@ -278,12 +290,7 @@ class TrendChart {
 
     drawPredictionChart(currentPh, predictions, history) {
         this._getSize();
-        this.container.innerHTML = '';
-
-        const svg = d3.select(`#${this.containerId}`)
-            .append('svg')
-            .attr('width', this.width)
-            .attr('height', this.height);
+        const svg = this._getSvg();
 
         const innerWidth = this.width - this.margin.left - this.margin.right;
         const innerHeight = this.height - this.margin.top - this.margin.bottom;
@@ -422,17 +429,12 @@ class TrendChart {
 
     drawMoldRiskChart(data) {
         this._getSize();
-        this.container.innerHTML = '';
+        const svg = this._getSvg();
 
         if (!data || data.length === 0) {
             this._drawEmptyState('暂无数据');
             return;
         }
-
-        const svg = d3.select(`#${this.containerId}`)
-            .append('svg')
-            .attr('width', this.width)
-            .attr('height', this.height);
 
         const innerWidth = this.width - this.margin.left - this.margin.right;
         const innerHeight = this.height - this.margin.top - this.margin.bottom;
@@ -485,14 +487,11 @@ class TrendChart {
     }
 
     _drawEmptyState(message) {
-        const svg = d3.select(`#${this.containerId}`)
-            .append('svg')
-            .attr('width', this.width || 400)
-            .attr('height', this.height || 200);
+        const svg = this._getSvg();
 
         svg.append('text')
-            .attr('x', (this.width || 400) / 2)
-            .attr('y', (this.height || 200) / 2)
+            .attr('x', this.width / 2)
+            .attr('y', this.height / 2)
             .attr('text-anchor', 'middle')
             .attr('dominant-baseline', 'middle')
             .attr('fill', '#999')

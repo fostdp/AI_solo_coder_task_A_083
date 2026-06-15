@@ -7,9 +7,13 @@ class ArrheniusAgingModel:
     """
     纸张老化动力学模型 - 基于Arrhenius方程
     纸张纤维素降解速率与温度、湿度的关系
+
+    不同纸张原料的活化能(Ea)差异：
+    - 竹纸 (bamboo): Ea = 78 kJ/mol (半纤维素含量高，易降解)
+    - 皮纸类 (cotton/rice): Ea = 85 kJ/mol (纤维素纯度高，更稳定)
+    - 开化纸/雪连纸: Ea = 90 kJ/mol (优质皮纸，耐久性最佳)
     """
 
-    Ea = 100.0
     R = 8.314
     A = 1.0e10
 
@@ -17,27 +21,88 @@ class ArrheniusAgingModel:
     REF_TEMP = 298.15
     REF_HUMIDITY = 50.0
 
+    PAPER_TYPE_MAP = {
+        "竹纸": "bamboo",
+        "棉纸": "cotton",
+        "皮纸": "cotton",
+        "麻纸": "cotton",
+        "开化纸": "kaihua",
+        "雪连纸": "xuelian",
+        "宣纸": "rice",
+        "bamboo": "bamboo",
+        "cotton": "cotton",
+        "rice": "rice",
+        "xuelian": "xuelian",
+        "kaihua": "kaihua"
+    }
+
     def __init__(self, paper_type: str = "bamboo"):
+        self.paper_type_key = self._normalize_paper_type(paper_type)
         self.paper_type = paper_type
         self._set_paper_parameters()
 
+    def _normalize_paper_type(self, paper_type: str) -> str:
+        """将中文纸张名称映射为内部key"""
+        return self.PAPER_TYPE_MAP.get(paper_type, "bamboo")
+
     def _set_paper_parameters(self):
+        """
+        根据纸张类型设置动力学参数
+        活化能 Ea (kJ/mol) 是影响老化速率的关键参数：
+        - Ea越低，温度对老化速率的影响越敏感
+        - 竹纸半纤维素含量高 → Ea低 → 易老化
+        - 皮纸纤维素纯度高 → Ea高 → 更耐久
+        """
         params = {
-            "bamboo": {"ph0": 6.5, "k_factor": 1.2, "strength_factor": 0.8},
-            "cotton": {"ph0": 7.0, "k_factor": 0.7, "strength_factor": 1.3},
-            "rice": {"ph0": 6.8, "k_factor": 0.9, "strength_factor": 1.0},
-            "xuelian": {"ph0": 7.5, "k_factor": 0.5, "strength_factor": 1.5},
-            "kaihua": {"ph0": 7.2, "k_factor": 0.6, "strength_factor": 1.4},
+            "bamboo": {
+                "ph0": 6.5,
+                "Ea": 78.0,
+                "k_factor": 1.2,
+                "strength_factor": 0.8,
+                "display_name": "竹纸"
+            },
+            "cotton": {
+                "ph0": 7.0,
+                "Ea": 85.0,
+                "k_factor": 0.7,
+                "strength_factor": 1.3,
+                "display_name": "皮纸"
+            },
+            "rice": {
+                "ph0": 6.8,
+                "Ea": 83.0,
+                "k_factor": 0.9,
+                "strength_factor": 1.0,
+                "display_name": "宣纸"
+            },
+            "xuelian": {
+                "ph0": 7.5,
+                "Ea": 92.0,
+                "k_factor": 0.5,
+                "strength_factor": 1.5,
+                "display_name": "雪连纸"
+            },
+            "kaihua": {
+                "ph0": 7.2,
+                "Ea": 90.0,
+                "k_factor": 0.6,
+                "strength_factor": 1.4,
+                "display_name": "开化纸"
+            },
         }
-        p = params.get(self.paper_type, params["bamboo"])
+        p = params.get(self.paper_type_key, params["bamboo"])
         self.initial_ph = p["ph0"]
+        self.Ea = p["Ea"]
         self.k_factor = p["k_factor"]
         self.strength_factor = p["strength_factor"]
+        self.display_name = p["display_name"]
 
     def arrhenius_rate(self, temperature_c: float) -> float:
         """
         计算Arrhenius速率常数
         k = A * exp(-Ea / (R * T))
+
+        其中Ea为纸张特定的活化能，已在初始化时根据paper_type设置
         """
         T_kelvin = temperature_c + 273.15
         k = self.A * math.exp(-self.Ea * 1000 / (self.R * T_kelvin))

@@ -182,14 +182,19 @@ async def batch_predict(shelf_ids: List[str] = None):
         shelves = [s for s in shelves if s["shelf_id"] in shelf_ids]
 
     results = []
-    aging_model = ArrheniusAgingModel()
     mold_model = MoldGrowthModel()
+    aging_models = {}
 
     for shelf in shelves:
         temp = shelf.get("temperature", 20)
         humid = shelf.get("humidity", 50)
         ph = shelf.get("ph_value", 7.0)
         mold = shelf.get("mold_spore", 50)
+        material = shelf.get("material", "竹纸")
+
+        if material not in aging_models:
+            aging_models[material] = ArrheniusAgingModel(paper_type=material)
+        aging_model = aging_models[material]
 
         aging_info = aging_model.aging_index(temp, humid, ph)
         ph_pred_90 = aging_model.predict_ph(ph, temp, humid, 90)
@@ -200,6 +205,7 @@ async def batch_predict(shelf_ids: List[str] = None):
             "shelf_id": shelf["shelf_id"],
             "slot_id": shelf["slot_id"],
             "book_title": shelf.get("book_title", ""),
+            "paper_type": aging_model.display_name,
             "current_ph": ph,
             "predicted_ph_90d": ph_pred_90,
             "aging_severity": aging_info["aging_severity"],

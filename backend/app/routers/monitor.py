@@ -105,7 +105,11 @@ async def get_slot_detail(shelf_id: str, slot_id: str, days: int = Query(90, ge=
     current_ph = ph_trend[-1]["avg_ph"] if ph_trend else 7.0
     current_mold = env_trend[-1]["avg_mold_spore"] if env_trend else 50
 
-    aging_model = ArrheniusAgingModel()
+    paper_type = "bamboo"
+    if books and len(books) > 0:
+        paper_type = books[0].get("material", "bamboo")
+
+    aging_model = ArrheniusAgingModel(paper_type=paper_type)
     aging_info = aging_model.aging_index(current_temp, current_humid, current_ph)
     ph_prediction = aging_model.predict_ph_multiple(current_ph, current_temp, current_humid, [30, 90, 180])
 

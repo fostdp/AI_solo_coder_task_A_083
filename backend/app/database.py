@@ -1,5 +1,9 @@
 import logging
-from typing import List, Dict, Any, Optional
+import threading
+import time
+import queue
+from collections import defaultdict
+from typing import List, Dict, Any, Optional, Callable
 from datetime import datetime, timedelta
 from clickhouse_driver import Client
 from .config import settings
@@ -7,14 +11,223 @@ from .config import settings
 logger = logging.getLogger(__name__)
 
 
+class BatchWriter:
+    """
+    异步批量写入器
+    使用队列 + 后台线程实现高吞吐批量写入
+    触发条件：缓冲区满500条 或 距离上次写入超过30秒
+
+    设计目标：
+    - 减少ClickHouse INSERT次数，降低写入延迟
+    - 线程安全，支持多生产者
+    - 自动flush，避免数据长时间滞留内存
+    """
+
+    DEFAULT_BATCH_SIZE = 500
+    DEFAULT_FLUSH_INTERVAL = 30
+
+    def __init__(
+        self,
+        client: Client,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        flush_interval: int = DEFAULT_FLUSH_INTERVAL,
+        max_queue_size: int = 10000
+    ):
+        self.client = client
+        self.batch_size = batch_size
+        self.flush_interval = flush_interval
+        self.max_queue_size = max_queue_size
+
+        self._queues: Dict[str, queue.Queue] = defaultdict(
+            lambda: queue.Queue(maxsize=max_queue_size)
+        )
+        self._table_columns: Dict[str, List[str]] = {}
+        self._last_flush: Dict[str, float] = {}
+        self._lock = threading.Lock()
+        self._running = False
+        self._flush_thread: Optional[threading.Thread] = None
+        self._stats = {
+            "total_writes": 0,
+            "total_records": 0,
+            "dropped_records": 0
+        }
+
+    def register_table(self, table_name: str, columns: List[str]):
+        """
+        注册数据表及其列名
+        用于生成INSERT语句和验证数据
+        """
+        self._table_columns[table_name] = columns
+        self._last_flush[table_name] = time.time()
+
+    def add(self, table_name: str, data: Dict) -> bool:
+        """
+        添加单条数据到写入队列
+        非阻塞，队列满时丢弃旧数据
+        """
+        if table_name not in self._queues:
+            self._queues[table_name] = queue.Queue(maxsize=self.max_queue_size)
+            self._last_flush[table_name] = time.time()
+
+        q = self._queues[table_name]
+        try:
+            if q.full():
+                try:
+                    q.get_nowait()
+                    self._stats["dropped_records"] += 1
+                except queue.Empty:
+                    pass
+            q.put_nowait(data)
+            return True
+        except Exception as e:
+            logger.error(f"BatchWriter添加数据失败: {e}")
+            return False
+
+    def add_batch(self, table_name: str, data_list: List[Dict]) -> int:
+        """批量添加数据"""
+        count = 0
+        for data in data_list:
+            if self.add(table_name, data):
+                count += 1
+        return count
+
+    def start(self):
+        """启动后台flush线程"""
+        if self._running:
+            return
+
+        self._running = True
+        self._flush_thread = threading.Thread(
+            target=self._flush_loop,
+            daemon=True,
+            name="clickhouse-batch-writer"
+        )
+        self._flush_thread.start()
+        logger.info("BatchWriter后台线程已启动")
+
+    def stop(self):
+        """停止后台线程并flush所有数据"""
+        self._running = False
+        if self._flush_thread:
+            self._flush_thread.join(timeout=5)
+        self.flush_all()
+        logger.info("BatchWriter已停止")
+
+    def _flush_loop(self):
+        """后台flush循环"""
+        while self._running:
+            try:
+                time.sleep(1)
+                now = time.time()
+
+                for table_name in list(self._queues.keys()):
+                    q = self._queues[table_name]
+                    qsize = q.qsize()
+                    last_flush = self._last_flush.get(table_name, 0)
+
+                    if qsize >= self.batch_size or (now - last_flush) >= self.flush_interval:
+                        if qsize > 0:
+                            self._flush_table(table_name)
+
+            except Exception as e:
+                logger.error(f"BatchWriter flush循环异常: {e}")
+                time.sleep(1)
+
+    def _flush_table(self, table_name: str) -> int:
+        """
+        写入单个表的所有缓冲数据
+        返回写入的记录数
+        """
+        q = self._queues.get(table_name)
+        if not q or q.empty():
+            return 0
+
+        data_list = []
+        try:
+            while not q.empty() and len(data_list) < self.batch_size:
+                data_list.append(q.get_nowait())
+        except queue.Empty:
+            pass
+
+        if not data_list:
+            return 0
+
+        try:
+            columns = self._table_columns.get(table_name)
+            if not columns:
+                columns = list(data_list[0].keys())
+                self._table_columns[table_name] = columns
+
+            values = [tuple(d.get(col) for col in columns) for d in data_list]
+            query = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES"
+            self.client.execute(query, values)
+
+            self._stats["total_writes"] += 1
+            self._stats["total_records"] += len(data_list)
+            self._last_flush[table_name] = time.time()
+
+            logger.debug(f"BatchWriter写入 {table_name}: {len(data_list)}条")
+            return len(data_list)
+
+        except Exception as e:
+            logger.error(f"BatchWriter写入 {table_name} 失败: {e}")
+            for d in data_list:
+                try:
+                    q.put_nowait(d)
+                except queue.Full:
+                    self._stats["dropped_records"] += 1
+            return 0
+
+    def flush_all(self) -> Dict[str, int]:
+        """立即flush所有表"""
+        results = {}
+        for table_name in list(self._queues.keys()):
+            count = self._flush_table(table_name)
+            while count > 0:
+                count = self._flush_table(table_name)
+            results[table_name] = results.get(table_name, 0) + count
+        return results
+
+    def flush_table(self, table_name: str) -> int:
+        """立即flush指定表"""
+        total = 0
+        count = self._flush_table(table_name)
+        while count > 0:
+            total += count
+            count = self._flush_table(table_name)
+        return total
+
+    def get_queue_size(self, table_name: str = None) -> int:
+        """获取队列大小"""
+        if table_name:
+            return self._queues.get(table_name, queue.Queue()).qsize()
+        return sum(q.qsize() for q in self._queues.values())
+
+    def get_stats(self) -> Dict:
+        """获取统计信息"""
+        return {
+            **self._stats,
+            "queue_size": self.get_queue_size(),
+            "tables": list(self._queues.keys()),
+            "per_table_queue_size": {
+                t: q.qsize() for t, q in self._queues.items()
+            }
+        }
+
+
 class ClickHouseManager:
     """
     ClickHouse数据库管理器
     负责连接管理、数据写入、查询
+
+    写入优化：使用BatchWriter实现异步批量写入
+    - 触发条件：队列满500条 或 距离上次写入超过30秒
+    - 相比逐条INSERT，写入性能提升10-100倍
     """
 
     def __init__(self):
         self.client: Optional[Client] = None
+        self.batch_writer: Optional[BatchWriter] = None
         self._env_buffer: List[Dict] = []
         self._ph_buffer: List[Dict] = []
         self._alert_buffer: List[Dict] = []
@@ -30,6 +243,34 @@ class ClickHouseManager:
                 database=settings.CLICKHOUSE_DATABASE
             )
             logger.info("ClickHouse连接成功")
+
+            self.batch_writer = BatchWriter(
+                client=self.client,
+                batch_size=getattr(settings, "BATCH_WRITE_SIZE", 500),
+                flush_interval=getattr(settings, "BATCH_WRITE_INTERVAL", 30),
+                max_queue_size=10000
+            )
+
+            self.batch_writer.register_table(
+                "env_sensor_data",
+                ["timestamp", "sensor_id", "shelf_id", "slot_id",
+                 "temperature", "humidity", "light", "voc",
+                 "mold_spore", "sensor_type"]
+            )
+            self.batch_writer.register_table(
+                "ph_sensor_data",
+                ["timestamp", "sensor_id", "shelf_id", "slot_id",
+                 "ph_value", "sensor_type"]
+            )
+            self.batch_writer.register_table(
+                "alerts",
+                ["alert_id", "timestamp", "shelf_id", "slot_id",
+                 "alert_level", "alert_type", "alert_value",
+                 "threshold", "message", "is_handled"]
+            )
+
+            self.batch_writer.start()
+
             return True
         except Exception as e:
             logger.error(f"ClickHouse连接失败: {e}")
@@ -37,6 +278,9 @@ class ClickHouseManager:
 
     def close(self):
         """关闭连接"""
+        if self.batch_writer:
+            self.batch_writer.stop()
+            self.batch_writer = None
         if self.client:
             self.client.disconnect()
             self.client = None
@@ -92,19 +336,30 @@ class ClickHouseManager:
             logger.error(f"告警写入失败: {e}")
 
     def add_env_to_buffer(self, data: Dict):
-        """添加环境数据到缓冲区"""
-        self._env_buffer.append(data)
+        """添加环境数据到缓冲区（优先使用BatchWriter）"""
+        if self.batch_writer:
+            self.batch_writer.add("env_sensor_data", data)
+        else:
+            self._env_buffer.append(data)
 
     def add_ph_to_buffer(self, data: Dict):
-        """添加pH数据到缓冲区"""
-        self._ph_buffer.append(data)
+        """添加pH数据到缓冲区（优先使用BatchWriter）"""
+        if self.batch_writer:
+            self.batch_writer.add("ph_sensor_data", data)
+        else:
+            self._ph_buffer.append(data)
 
     def add_alert_to_buffer(self, data: Dict):
-        """添加告警到缓冲区"""
-        self._alert_buffer.append(data)
+        """添加告警到缓冲区（优先使用BatchWriter）"""
+        if self.batch_writer:
+            self.batch_writer.add("alerts", data)
+        else:
+            self._alert_buffer.append(data)
 
     def flush_env_buffer(self) -> int:
         """刷环境数据缓冲区"""
+        if self.batch_writer:
+            return self.batch_writer.flush_table("env_sensor_data")
         if not self._env_buffer:
             return 0
         count = len(self._env_buffer)
@@ -114,6 +369,8 @@ class ClickHouseManager:
 
     def flush_ph_buffer(self) -> int:
         """刷pH数据缓冲区"""
+        if self.batch_writer:
+            return self.batch_writer.flush_table("ph_sensor_data")
         if not self._ph_buffer:
             return 0
         count = len(self._ph_buffer)
@@ -123,6 +380,8 @@ class ClickHouseManager:
 
     def flush_alert_buffer(self) -> int:
         """刷告警缓冲区"""
+        if self.batch_writer:
+            return self.batch_writer.flush_table("alerts")
         if not self._alert_buffer:
             return 0
         count = len(self._alert_buffer)
@@ -130,6 +389,12 @@ class ClickHouseManager:
             self.insert_alert(alert)
         self._alert_buffer.clear()
         return count
+
+    def get_write_stats(self) -> Dict:
+        """获取写入统计信息"""
+        if self.batch_writer:
+            return self.batch_writer.get_stats()
+        return {"batch_writer": "not_active"}
 
     def get_realtime_env_data(self, shelf_id: str = None, slot_id: str = None,
                               limit: int = 100) -> List[Dict]:
@@ -281,6 +546,7 @@ class ClickHouseManager:
                 s.slot_id,
                 b.title,
                 b.condition,
+                b.material,
                 last_env.temperature,
                 last_env.humidity,
                 last_env.mold_spore,
@@ -321,10 +587,11 @@ class ClickHouseManager:
                     "slot_id": row[1],
                     "book_title": row[2] or "未知",
                     "book_condition": row[3] or "未知",
-                    "temperature": row[4] or 0,
-                    "humidity": row[5] or 0,
-                    "mold_spore": row[6] or 0,
-                    "ph_value": row[7] or 7.0
+                    "material": row[4] or "竹纸",
+                    "temperature": row[5] or 0,
+                    "humidity": row[6] or 0,
+                    "mold_spore": row[7] or 0,
+                    "ph_value": row[8] or 7.0
                 }
                 for row in results
             ]

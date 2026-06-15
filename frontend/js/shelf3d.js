@@ -21,13 +21,24 @@ class Shelf3D {
         this.selectedSlot = null;
         this.onSlotClick = null;
 
+        this._bgImageData = null;
+        this._bgDirty = true;
+        this._lastViewState = null;
+
         this._init();
     }
 
     _init() {
         this._resize();
-        window.addEventListener('resize', () => this._resize());
+        window.addEventListener('resize', () => this._handleResize());
         this._bindEvents();
+    }
+
+    _handleResize() {
+        this._resize();
+        this._bgDirty = true;
+        this._bgImageData = null;
+        this.render();
     }
 
     _resize() {
@@ -239,10 +250,17 @@ class Shelf3D {
 
     render() {
         const ctx = this.ctx;
-        ctx.clearRect(0, 0, this.width, this.height);
 
-        this._drawGrid();
-        this._drawShelves();
+        const viewStateChanged = this._checkViewStateChanged();
+
+        if (viewStateChanged || this._bgDirty || !this._bgImageData) {
+            this._renderBackground();
+            this._bgDirty = false;
+            this._saveViewState();
+        } else {
+            ctx.putImageData(this._bgImageData, 0, 0);
+        }
+
         this._drawHeatmapSlots();
 
         if (this.hoveredSlot) {
@@ -252,6 +270,41 @@ class Shelf3D {
         if (this.selectedSlot) {
             this._drawSelectedHighlight();
         }
+    }
+
+    _checkViewStateChanged() {
+        if (!this._lastViewState) return true;
+        return (
+            this._lastViewState.viewAngleX !== this.viewAngleX ||
+            this._lastViewState.viewAngleY !== this.viewAngleY ||
+            this._lastViewState.zoom !== this.zoom ||
+            this._lastViewState.offsetX !== this.offsetX ||
+            this._lastViewState.offsetY !== this.offsetY ||
+            this._lastViewState.width !== this.width ||
+            this._lastViewState.height !== this.height
+        );
+    }
+
+    _saveViewState() {
+        this._lastViewState = {
+            viewAngleX: this.viewAngleX,
+            viewAngleY: this.viewAngleY,
+            zoom: this.zoom,
+            offsetX: this.offsetX,
+            offsetY: this.offsetY,
+            width: this.width,
+            height: this.height
+        };
+    }
+
+    _renderBackground() {
+        const ctx = this.ctx;
+        ctx.clearRect(0, 0, this.width, this.height);
+
+        this._drawGrid();
+        this._drawShelves();
+
+        this._bgImageData = ctx.getImageData(0, 0, this.width, this.height);
     }
 
     _drawGrid() {
